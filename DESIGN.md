@@ -76,10 +76,22 @@ Invalid values are logged and replaced by the default. The web UI edits the same
   `fakelib/` (all files; the old `game_fakelib` setting is gone and ignored in `config.toml`);
   `libkernel.sprx` always dropped. `fakelib2/` (SMP) wins
   over `fakelib/` and is used as-is; it is never indexed or copied as game files. All files 0777.
+  A `libSceSaveData.native.sprx` (some packages ship a firmware's save library as a backport) is
+  then removed when its Sony build id is not newer than the console's own copy's, and logged with
+  both ids and the title id. A Sony library carries its build id in its build paths
+  (`W:/Build/J<n>/`, `W:\Build\J<n>\`), and ids grow with firmware. The copy's id is read from the
+  file (`sys::sony_build`). The console's own is encrypted on disk, so `sys::system_lib_build`
+  loads `/system/common/lib/libSceSaveData.native.sprx` into the payload (`dlopen`, no save call)
+  and reads the id from its readable, non-executable memory (`kernel_dynlib_mapbase_addr`, then
+  `sceKernelQueryMemoryProtection` region by region); once per run, only when a copy is present,
+  logged. A copy without a build id, or a console id that cannot be read, stays. An older save
+  library than the console's makes the game miss its saves or fail its first save with CE-107098-5
+  (#64, #68); on an older console the copy is what the backport needs.
   Then, with `inject_ampr`, every file of `/data/krakenmount/ampr/` (not `libkernel.sprx`) is copied on top,
   so ours wins over the game's own `libSceAmpr.sprx`. `.ampr` records what was copied (name, size,
   mtime); when the ampr dir or `inject_ampr` changes, or `.done` still has a `game_fakelib` other
-  than `full` (a cache built before the setting was removed), `check` says `Fakelib` and only `fakelib/` is
+  than `full` (a cache built before the setting was removed), or `fakelib/` holds a
+  `libSceSaveData.native.sprx` not newer than the console's own, `check` says `Fakelib` and only `fakelib/` is
   recomposed (`refresh_fakelib`, which then rewrites `.done` with its own mtime), no extraction or re-registration. `fakelib/` is not in the AMPR index.
 - A folder game's cache is only `fakelib/`, `.ampr`, `.built`, `.done`: nothing of the game is copied.
 - Fresh when `.done` exists, its JSON stamp equals the expected one

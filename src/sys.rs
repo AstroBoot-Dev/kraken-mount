@@ -210,6 +210,57 @@ pub fn notify(msg: &str) {
     }
 }
 
+extern "C" {
+    fn kernel_dynlib_handle(pid: libc::pid_t, basename: *const std::ffi::c_char, handle: *mut u32) -> i32;
+    fn kernel_dynlib_mapbase_addr(pid: libc::pid_t, handle: u32) -> isize;
+    fn sceKernelQueryMemoryProtection(
+        addr: *mut std::ffi::c_void,
+        start: *mut *mut std::ffi::c_void,
+        end: *mut *mut std::ffi::c_void,
+        prot: *mut i32,
+    ) -> i32;
+}
+
+const PROT_CPU_READ: i32 = 1;
+const PROT_CPU_EXEC: i32 = 4;
+const MAX_LIB_REGIONS: usize = 32;
+
+pub fn sony_build(bytes: &[u8]) -> Option<u32> {
+    let is_mark = |w: &[u8]| (w[0] == b'/' || w[0] == b'\\') && &w[1..6] == b"Build" && w[6] == w[0] && w[7] == b'J';
+    let start = bytes.windows(8).position(is_mark)? + 8;
+    let digits = bytes[start..].iter().take_while(|b| b.is_ascii_digit()).count();
+    std::str::from_utf8(&bytes[start..start + digits]).ok()?.parse().ok()
+}
+
+pub fn system_lib_build(name: &str) -> Result<u32, String> {
+    let path = format!("/system/common/lib/{name}");
+    let cpath = CString::new(path.as_str()).expect("no NUL");
+    if unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_LAZY) }.is_null() {
+        return Err(format!("dlopen {path} failed"));
+    }
+    let basename = CString::new(name).expect("no NUL");
+    let mut handle = 0u32;
+    if unsafe { kernel_dynlib_handle(-1, basename.as_ptr(), &mut handle) } != 0 {
+        return Err(format!("{name} is not in the loaded library list"));
+    }
+    let mut addr = (unsafe { kernel_dynlib_mapbase_addr(-1, handle) }) as usize;
+    for _ in 0..MAX_LIB_REGIONS {
+        let (mut start, mut end, mut prot) = (std::ptr::null_mut(), std::ptr::null_mut(), 0);
+        if unsafe { sceKernelQueryMemoryProtection(addr as *mut _, &mut start, &mut end, &mut prot) } != 0 {
+            break;
+        }
+        let (start, end) = (start as usize, end as usize);
+        if prot & PROT_CPU_READ != 0 && prot & PROT_CPU_EXEC == 0 {
+            let readable = unsafe { std::slice::from_raw_parts(start as *const u8, end - start) };
+            if let Some(build) = sony_build(readable) {
+                return Ok(build);
+            }
+        }
+        addr = end;
+    }
+    Err(format!("no Sony build path in {name}'s readable memory"))
+}
+
 /// kstuff answers its KEKCALL_CHECK probe (SMP sm_kstuff_is_loaded, ps5-kstuff's contract):
 /// syscall 0xffffffff00000027 with zero arguments returns 0 with carry clear.
 pub fn kstuff_loaded() -> bool {

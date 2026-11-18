@@ -15,6 +15,7 @@ use std::fs::{self, File};
 use std::io::{Error, ErrorKind, Result, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 pub const CACHES: &str = "/data/krakenmount/caches";
@@ -582,12 +583,39 @@ pub fn check(src: &Source, s: &Settings) -> Fresh {
     if had != ampr_state(s) {
         return Fresh::Fakelib(format!("{AMPR_DIR} or inject_ampr changed"));
     }
+    if outdated_save_lib(&dir(&src.title_id).join("fakelib")).is_some() {
+        return Fresh::Fakelib(format!("fakelib/{SAVE_DATA_LIB} is not newer than the console's own"));
+    }
     Fresh::Fresh
 }
 
 /// Whether fakelib file `name` goes into the cache's fakelib/: everything but libkernel.sprx.
 fn keep_fakelib(name: &str) -> bool {
     !name.eq_ignore_ascii_case("libkernel.sprx")
+}
+
+const SAVE_DATA_LIB: &str = "libSceSaveData.native.sprx";
+
+fn console_save_data_build() -> Option<u32> {
+    static BUILD: OnceLock<Option<u32>> = OnceLock::new();
+    *BUILD.get_or_init(|| match crate::sys::system_lib_build(SAVE_DATA_LIB) {
+        Ok(build) => {
+            log!("console {SAVE_DATA_LIB} is Sony build J{build:08}");
+            Some(build)
+        }
+        Err(e) => {
+            log!("console {SAVE_DATA_LIB}: {e}; copies in fakelib/ are kept");
+            None
+        }
+    })
+}
+
+fn outdated_save_lib(fakelib: &Path) -> Option<String> {
+    let copy = crate::sys::sony_build(&fs::read(fakelib.join(SAVE_DATA_LIB)).ok()?)?;
+    let console = console_save_data_build()?;
+    (console >= copy).then(|| {
+        format!("fakelib/{SAVE_DATA_LIB} is Sony build J{copy:08}, not newer than the console's own J{console:08}")
+    })
 }
 
 /// Copies the regular files directly in `from` that pass `keep` into `to`, 0777.
@@ -640,6 +668,10 @@ fn compose_fakelib(src: &Source, s: &Settings, pkg: Option<(&Io, &Pkg)>) -> Resu
         }
     } else if let Some(lib) = lib_dir(src) {
         copy_flat(&lib, &fakelib, keep_fakelib)?;
+    }
+    if let Some(why) = outdated_save_lib(&fakelib) {
+        fs::remove_file(fakelib.join(SAVE_DATA_LIB))?;
+        log!("{}: {why}; left out", src.title_id);
     }
     // Our ampr-emu-ng on top of whatever the game or backport ships (its own libSceAmpr.sprx included).
     // State read before the copy: a file replaced mid-copy (ampr auto-update) then differs at the
